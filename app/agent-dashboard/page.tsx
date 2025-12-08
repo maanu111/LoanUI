@@ -11,6 +11,8 @@ import {
   CheckCircle,
   Award,
   Download,
+  XCircle,
+  Info,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -28,34 +30,63 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+interface Cashback {
+  cashback_amount: number;
+  status: string;
+}
 
 interface Commission {
   id: string;
   commission_amount: number;
+  original_amount: number;
   level: number;
   status: string;
   created_at: string;
+  paid_at: string | null;
   from_agent_id: string;
   plan_id: string;
+  payment_id: string | null;
+  plan?: {
+    plan_name: string;
+  };
+  from_agent?: {
+    user?: {
+      name: string;
+    };
+  };
 }
 
 interface Stats {
   totalEarnings: number;
   pendingEarnings: number;
   paidEarnings: number;
+  cancelledEarnings: number;
   totalNetwork: number;
   directReferrals: number;
   activeReferrals: number;
+  activePlans: number;
+  instantCashback: number;
+  availableBalance: number;
+  totalWithdrawn: number;
+  pendingWithdrawal: number;
 }
 
 interface EarningsByLevel {
   level: number;
   amount: number;
+  count: number;
 }
 
 interface EarningsByPlan {
   plan_name: string;
   amount: number;
+  count: number;
+  commission_rate?: number;
+}
+
+interface EarningsByStatus {
+  name: string;
+  value: number;
   [key: string]: any;
 }
 
@@ -66,13 +97,23 @@ export default function AgentDashboard() {
     totalEarnings: 0,
     pendingEarnings: 0,
     paidEarnings: 0,
+    cancelledEarnings: 0,
     totalNetwork: 0,
     directReferrals: 0,
     activeReferrals: 0,
+    activePlans: 0,
+    instantCashback: 0,
+    availableBalance: 0,
+    totalWithdrawn: 0,
+    pendingWithdrawal: 0,
   });
+
   const [commissions, setCommissions] = useState<Commission[]>([]);
   const [earningsByLevel, setEarningsByLevel] = useState<EarningsByLevel[]>([]);
   const [earningsByPlan, setEarningsByPlan] = useState<EarningsByPlan[]>([]);
+  const [earningsByStatus, setEarningsByStatus] = useState<EarningsByStatus[]>(
+    []
+  );
   const [earningsTimeline, setEarningsTimeline] = useState<any[]>([]);
 
   useEffect(() => {
@@ -104,16 +145,46 @@ export default function AgentDashboard() {
       // Get agent data
       const { data: agentData } = await supabase
         .from("agents")
-        .select("id, total_referrals, active_referrals")
+        .select("id, total_referrals, active_referrals, referral_code")
         .eq("user_id", userData.id)
         .single();
 
       if (!agentData) return;
+      // ✅ Fetch cashback records
+      const { data: cashbackData } = await supabase
+        .from("agent_cashbacks")
 
-      // Fetch all commissions for this agent
+        .select("cashback_amount, status")
+        .eq("agent_id", agentData.id);
+      const totalCashback =
+        cashbackData?.reduce((sum, c) => sum + Number(c.cashback_amount), 0) ||
+        0;
+
+      /**
+       * Cashback is instantly credited,
+       * so entire amount is treated as PAID
+       */
+      const paidCashback = totalCashback;
+
+      // Get active plans count
+      const { data: agentPlans } = await supabase
+        .from("agent_plans")
+        .select("plan_id")
+        .eq("agent_id", agentData.id)
+        .eq("is_active", true);
+
+      // Fetch all commissions with related data - FIXED foreign key constraint
       const { data: commissionsData } = await supabase
         .from("commissions")
-        .select("*")
+        .select(
+          `
+          *,
+          plan:plans(plan_name),
+          from_agent:agents!commissions_from_agent_id_fkey(
+            user:users(name)
+          )
+        `
+        )
         .eq("agent_id", agentData.id)
         .order("created_at", { ascending: false });
 
@@ -125,14 +196,45 @@ export default function AgentDashboard() {
           (sum, c) => sum + Number(c.commission_amount),
           0
         ) || 0;
+
       const pendingEarnings =
         commissionsData
           ?.filter((c) => c.status === "pending")
           .reduce((sum, c) => sum + Number(c.commission_amount), 0) || 0;
+
       const paidEarnings =
         commissionsData
           ?.filter((c) => c.status === "paid")
           .reduce((sum, c) => sum + Number(c.commission_amount), 0) || 0;
+
+      const cancelledEarnings =
+        commissionsData
+          ?.filter((c) => c.status === "cancelled")
+          .reduce((sum, c) => sum + Number(c.commission_amount), 0) || 0;
+
+      // Get withdrawn amounts
+      const { data: completedWithdrawals } = await supabase
+        .from("withdrawal_requests")
+        .select("amount")
+        .eq("agent_id", agentData.id)
+        .eq("status", "completed");
+
+      const totalWithdrawn =
+        completedWithdrawals?.reduce((sum, w) => sum + Number(w.amount), 0) ||
+        0;
+
+      // Get pending withdrawals
+      const { data: pendingWithdrawals } = await supabase
+        .from("withdrawal_requests")
+        .select("amount")
+        .eq("agent_id", agentData.id)
+        .in("status", ["pending", "approved"]);
+
+      const pendingWithdrawalAmount =
+        pendingWithdrawals?.reduce((sum, w) => sum + Number(w.amount), 0) || 0;
+
+      const availableBalance =
+        paidEarnings + paidCashback - totalWithdrawn - pendingWithdrawalAmount;
 
       // Get direct referrals count
       const { count: directCount } = await supabase
@@ -141,48 +243,74 @@ export default function AgentDashboard() {
         .eq("sponsor_id", agentData.id);
 
       setStats({
-        totalEarnings,
+        totalEarnings: totalEarnings - cancelledEarnings + totalCashback,
+        instantCashback: totalCashback,
         pendingEarnings,
         paidEarnings,
+        cancelledEarnings,
         totalNetwork: agentData.total_referrals || 0,
         directReferrals: directCount || 0,
         activeReferrals: agentData.active_referrals || 0,
+        activePlans: agentPlans?.length || 0,
+        availableBalance,
+        totalWithdrawn,
+        pendingWithdrawal: pendingWithdrawalAmount,
       });
 
       // Earnings by level
-      const levelMap = new Map<number, number>();
-      commissionsData?.forEach((c) => {
-        const current = levelMap.get(c.level) || 0;
-        levelMap.set(c.level, current + Number(c.commission_amount));
-      });
+      const levelMap = new Map<number, { amount: number; count: number }>();
+      commissionsData
+        ?.filter((c) => c.status !== "cancelled")
+        .forEach((c) => {
+          const current = levelMap.get(c.level) || { amount: 0, count: 0 };
+          levelMap.set(c.level, {
+            amount: current.amount + Number(c.commission_amount),
+            count: current.count + 1,
+          });
+        });
+
       const levelData = Array.from(levelMap.entries())
-        .map(([level, amount]) => ({ level, amount }))
+        .map(([level, data]) => ({ level, ...data }))
         .sort((a, b) => a.level - b.level);
       setEarningsByLevel(levelData);
 
       // Earnings by plan
-      const planIds = [
-        ...new Set(commissionsData?.map((c) => c.plan_id) || []),
-      ];
-      const { data: plansData } = await supabase
-        .from("plans")
-        .select("id, plan_name")
-        .in("id", planIds);
+      const planMap = new Map<
+        string,
+        { amount: number; count: number; name: string }
+      >();
+      commissionsData
+        ?.filter((c) => c.status !== "cancelled")
+        .forEach((c) => {
+          const planName = c.plan?.plan_name || "Unknown";
+          const current = planMap.get(c.plan_id) || {
+            amount: 0,
+            count: 0,
+            name: planName,
+          };
+          planMap.set(c.plan_id, {
+            amount: current.amount + Number(c.commission_amount),
+            count: current.count + 1,
+            name: planName,
+          });
+        });
 
-      const planMap = new Map<string, number>();
-      commissionsData?.forEach((c) => {
-        const current = planMap.get(c.plan_id) || 0;
-        planMap.set(c.plan_id, current + Number(c.commission_amount));
-      });
-
-      const planData = Array.from(planMap.entries()).map(
-        ([plan_id, amount]) => ({
-          plan_name:
-            plansData?.find((p) => p.id === plan_id)?.plan_name || "Unknown",
-          amount,
-        })
-      );
+      const planData = Array.from(planMap.values()).map((data) => ({
+        plan_name: data.name,
+        amount: data.amount,
+        count: data.count,
+      }));
       setEarningsByPlan(planData);
+
+      // Earnings by status
+      const statusData: EarningsByStatus[] = [
+        { name: "Paid", value: paidEarnings },
+        { name: "Pending", value: pendingEarnings },
+      ];
+      if (cancelledEarnings > 0) {
+        statusData.push({ name: "Cancelled", value: cancelledEarnings });
+      }
+      setEarningsByStatus(statusData);
 
       // Timeline data (last 7 days)
       const last7Days = Array.from({ length: 7 }, (_, i) => {
@@ -194,7 +322,9 @@ export default function AgentDashboard() {
       const timelineData = last7Days.map((date) => {
         const dayEarnings =
           commissionsData
-            ?.filter((c) => c.created_at.startsWith(date))
+            ?.filter(
+              (c) => c.created_at.startsWith(date) && c.status !== "cancelled"
+            )
             .reduce((sum, c) => sum + Number(c.commission_amount), 0) || 0;
         return {
           date: new Date(date).toLocaleDateString("en-IN", {
@@ -213,6 +343,11 @@ export default function AgentDashboard() {
   };
 
   const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6"];
+  const STATUS_COLORS = {
+    Paid: "#10b981",
+    Pending: "#f59e0b",
+    Cancelled: "#ef4444",
+  };
 
   if (loading) {
     return (
@@ -226,7 +361,7 @@ export default function AgentDashboard() {
     <div className="min-h-screen bg-gray-100">
       {/* Header */}
       <div className="bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-6">
+        <div className="max-w-9xl mx-auto px-4 py-6">
           <div className="flex items-center gap-4 mb-6">
             <button
               onClick={() => router.back()}
@@ -244,18 +379,22 @@ export default function AgentDashboard() {
             </div>
           </div>
 
-          {/* Stats Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            {/* Net Earnings */}
             <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <DollarSign className="w-5 h-5 text-white/80" />
-                <p className="text-sm text-white/80">Total Earnings</p>
+                <p className="text-sm text-white/80">Net Earnings</p>
               </div>
               <p className="text-2xl font-bold text-white">
                 ₹{stats.totalEarnings.toLocaleString("en-IN")}
               </p>
+              <p className="text-xs text-white/60 mt-1">
+                {stats.activePlans} active plans
+              </p>
             </div>
 
+            {/* Pending */}
             <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <Clock className="w-5 h-5 text-white/80" />
@@ -264,41 +403,60 @@ export default function AgentDashboard() {
               <p className="text-2xl font-bold text-yellow-400">
                 ₹{stats.pendingEarnings.toLocaleString("en-IN")}
               </p>
+              <p className="text-xs text-white/60 mt-1">Awaiting payment</p>
             </div>
 
+            {/* Available Balance */}
             <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <CheckCircle className="w-5 h-5 text-white/80" />
-                <p className="text-sm text-white/80">Paid</p>
+                <p className="text-sm text-white/80">Available</p>
               </div>
               <p className="text-2xl font-bold text-green-400">
-                ₹{stats.paidEarnings.toLocaleString("en-IN")}
+                ₹{stats.availableBalance.toLocaleString("en-IN")}
               </p>
+              <p className="text-xs text-white/60 mt-1">Ready to withdraw</p>
             </div>
 
+            {/* ✅ Instant Cashback */}
+            <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Award className="w-5 h-5 text-white/80" />
+                <p className="text-sm text-white/80">Instant Cashback</p>
+              </div>
+              <p className="text-2xl font-bold text-green-300">
+                ₹{stats.instantCashback.toLocaleString("en-IN")}
+              </p>
+              <p className="text-xs text-white/60 mt-1">Credited instantly</p>
+            </div>
+
+            {/* Network */}
             <div className="bg-white/10 backdrop-blur-sm rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <Users className="w-5 h-5 text-white/80" />
-                <p className="text-sm text-white/80">Total Network</p>
+                <p className="text-sm text-white/80">Network</p>
               </div>
               <p className="text-2xl font-bold text-white">
                 {stats.totalNetwork}
               </p>
               <p className="text-xs text-white/60 mt-1">
-                {stats.directReferrals} direct
+                {stats.directReferrals} direct • {stats.activeReferrals} active
               </p>
             </div>
           </div>
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+      <div className="max-w-9xl mx-auto px-4 py-6 space-y-6">
         {/* Earnings Timeline Chart */}
         <div className="bg-white rounded-lg shadow-sm p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-gray-900">
-              Earnings Timeline (Last 7 Days)
-            </h2>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">
+                Earnings Timeline
+              </h2>
+              <p className="text-sm text-gray-500">Last 7 days performance</p>
+            </div>
             <button className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1">
               <Download className="w-4 h-4" />
               Export
@@ -326,56 +484,85 @@ export default function AgentDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Earnings by Level */}
           <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">
-              Earnings by Level
-            </h2>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={earningsByLevel}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="level"
-                  label={{
-                    value: "Level",
-                    position: "insideBottom",
-                    offset: -5,
-                  }}
-                />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="amount" fill="#3b82f6" name="Earnings (₹)" />
-              </BarChart>
-            </ResponsiveContainer>
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Earnings by Level
+              </h2>
+              <p className="text-sm text-gray-500">
+                Commission breakdown by referral depth
+              </p>
+            </div>
+            {earningsByLevel.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={earningsByLevel}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="level"
+                    label={{
+                      value: "Level",
+                      position: "insideBottom",
+                      offset: -5,
+                    }}
+                  />
+                  <YAxis />
+                  <Tooltip
+                    formatter={(value: any, name: string) => {
+                      if (name === "amount")
+                        return [
+                          `₹${value.toLocaleString("en-IN")}`,
+                          "Earnings",
+                        ];
+                      return [value, "Count"];
+                    }}
+                  />
+                  <Legend />
+                  <Bar dataKey="amount" fill="#3b82f6" name="Earnings (₹)" />
+                  <Bar dataKey="count" fill="#10b981" name="Commissions" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[300px] text-gray-400">
+                <div className="text-center">
+                  <TrendingUp className="w-12 h-12 mx-auto mb-2" />
+                  <p className="text-sm">No level data yet</p>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Earnings by Plan */}
-          {/* Earnings by Plan */}
+          {/* Earnings by Status */}
           <div className="bg-white rounded-lg shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">
-              Earnings by Plan
-            </h2>
-            {earningsByPlan.length > 0 ? (
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Earnings Status
+              </h2>
+              <p className="text-sm text-gray-500">
+                Payment status distribution
+              </p>
+            </div>
+            {earningsByStatus.length > 0 ? (
               <ResponsiveContainer width="100%" height={300}>
                 <PieChart>
                   <Pie
-                    data={earningsByPlan}
+                    data={earningsByStatus}
                     cx="50%"
                     cy="50%"
                     labelLine={false}
                     label={(entry: any) =>
-                      `${entry.plan_name} (${(
-                        (entry.percent || 0) * 100
-                      ).toFixed(0)}%)`
+                      `${entry.name} (₹${entry.value.toLocaleString("en-IN")})`
                     }
                     outerRadius={100}
                     fill="#8884d8"
-                    dataKey="amount"
-                    nameKey="plan_name"
+                    dataKey="value"
                   >
-                    {earningsByPlan.map((entry, index) => (
+                    {earningsByStatus.map((entry, index) => (
                       <Cell
                         key={`cell-${index}`}
-                        fill={COLORS[index % COLORS.length]}
+                        fill={
+                          STATUS_COLORS[
+                            entry.name as keyof typeof STATUS_COLORS
+                          ]
+                        }
                       />
                     ))}
                   </Pie>
@@ -389,12 +576,57 @@ export default function AgentDashboard() {
             ) : (
               <div className="flex items-center justify-center h-[300px] text-gray-400">
                 <div className="text-center">
-                  <Award className="w-12 h-12 mx-auto mb-2" />
-                  <p className="text-sm">No plan earnings yet</p>
+                  <Info className="w-12 h-12 mx-auto mb-2" />
+                  <p className="text-sm">No status data yet</p>
                 </div>
               </div>
             )}
           </div>
+        </div>
+
+        {/* Earnings by Plan */}
+        <div className="bg-white rounded-lg shadow-sm p-6">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">
+              Earnings by Plan
+            </h2>
+            <p className="text-sm text-gray-500">
+              Which plans generate most commission
+            </p>
+          </div>
+          {earningsByPlan.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {earningsByPlan.map((plan, index) => (
+                <div
+                  key={index}
+                  className="border rounded-lg p-4 hover:shadow-md transition-shadow"
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <h3 className="font-semibold text-gray-900">
+                      {plan.plan_name}
+                    </h3>
+                    <span
+                      className="w-3 h-3 rounded-full"
+                      style={{ backgroundColor: COLORS[index % COLORS.length] }}
+                    />
+                  </div>
+                  <p className="text-2xl font-bold text-gray-900 mb-1">
+                    ₹{plan.amount.toLocaleString("en-IN")}
+                  </p>
+                  <p className="text-sm text-gray-500">
+                    {plan.count} commissions
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-[200px] text-gray-400">
+              <div className="text-center">
+                <Award className="w-12 h-12 mx-auto mb-2" />
+                <p className="text-sm">No plan earnings yet</p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Recent Commissions Table */}
@@ -407,8 +639,11 @@ export default function AgentDashboard() {
               <thead className="border-b">
                 <tr className="text-left text-gray-600">
                   <th className="pb-3 font-medium">Date</th>
+                  <th className="pb-3 font-medium">From</th>
+                  <th className="pb-3 font-medium">Plan</th>
                   <th className="pb-3 font-medium">Level</th>
-                  <th className="pb-3 font-medium text-right">Amount</th>
+                  <th className="pb-3 font-medium text-right">Original</th>
+                  <th className="pb-3 font-medium text-right">Commission</th>
                   <th className="pb-3 font-medium">Status</th>
                 </tr>
               </thead>
@@ -425,10 +660,22 @@ export default function AgentDashboard() {
                         }
                       )}
                     </td>
+                    <td className="py-3 text-gray-700">
+                      {commission.from_agent?.user?.name || "Unknown"}
+                    </td>
+                    <td className="py-3 text-gray-700">
+                      {commission.plan?.plan_name || "N/A"}
+                    </td>
                     <td className="py-3">
                       <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">
-                        Level {commission.level}
+                        L{commission.level}
                       </span>
+                    </td>
+                    <td className="py-3 text-right text-gray-600">
+                      ₹
+                      {Number(commission.original_amount).toLocaleString(
+                        "en-IN"
+                      )}
                     </td>
                     <td className="py-3 text-right font-semibold text-gray-900">
                       ₹
@@ -438,14 +685,23 @@ export default function AgentDashboard() {
                     </td>
                     <td className="py-3">
                       <span
-                        className={`px-2 py-1 text-xs font-medium rounded-full ${
+                        className={`px-2 py-1 text-xs font-medium rounded-full inline-flex items-center gap-1 ${
                           commission.status === "paid"
                             ? "bg-green-100 text-green-700"
                             : commission.status === "pending"
                             ? "bg-yellow-100 text-yellow-700"
-                            : "bg-gray-100 text-gray-700"
+                            : "bg-red-100 text-red-700"
                         }`}
                       >
+                        {commission.status === "paid" && (
+                          <CheckCircle className="w-3 h-3" />
+                        )}
+                        {commission.status === "pending" && (
+                          <Clock className="w-3 h-3" />
+                        )}
+                        {commission.status === "cancelled" && (
+                          <XCircle className="w-3 h-3" />
+                        )}
                         {commission.status}
                       </span>
                     </td>

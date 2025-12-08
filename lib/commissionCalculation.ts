@@ -91,7 +91,8 @@ export async function calculateCommissions(
         original_amount: planAmount,
         level: level,
         payment_id: paymentId,
-        status: "pending",
+        status: "paid",
+        paid_at: new Date().toISOString(),
       });
     }
 

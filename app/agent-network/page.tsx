@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
 
 interface AgentNode {
   id: string;
@@ -19,8 +20,9 @@ interface AgentNode {
   agent?: {
     referral_code: string;
     is_active: boolean;
+    current_level: number;
   };
-  plans?: Array<{ plan_id: string; plan?: { name: string } }>;
+  plans?: Array<{ plan_id: string; plan?: { plan_name: string } }>;
   children: AgentNode[];
 }
 
@@ -39,12 +41,16 @@ export default function AgentNetworkPage() {
   const [planNetworkTrees, setPlanNetworkTrees] = useState<
     Map<string, AgentNode | null>
   >(new Map());
+  const router = useRouter();
   const [planStats, setPlanStats] = useState<Map<string, NetworkStats>>(
     new Map()
   );
   const [planSettings, setPlanSettings] = useState<Map<string, any>>(new Map());
   const [loading, setLoading] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
+  const [agentCommissions, setAgentCommissions] = useState<Map<string, number>>(
+    new Map()
+  );
 
   // Fetch current user and their agent ID
   useEffect(() => {
@@ -107,38 +113,47 @@ export default function AgentNetworkPage() {
     setLoading(true);
 
     try {
+      // Fetch plan settings
       const { data: settings, error: settingsError } = await supabase
         .from("plan_chain_settings")
         .select("*")
         .eq("plan_id", planId)
         .single();
 
+      console.log("⚙️ Settings:", { settings, settingsError });
+
       if (settings) {
         setPlanSettings((prev) => new Map(prev).set(planId, settings));
       }
 
+      // Fetch positions with agent details - FIXED with proper foreign key constraints
       const { data: positions, error: positionsError } = await supabase
         .from("plan_binary_positions")
         .select(
           `
-    *,
-    agent:agents!plan_binary_positions_agent_id_fkey(
-      id,
-      referral_code,
-      is_active,
-      user:users!agents_user_id_fkey(
-        id,
-        name,
-        email,
-        mobile_number
-      )
-    )
-  `
+            *,
+            agent:agents!plan_binary_positions_agent_id_fkey(
+              id,
+              referral_code,
+              is_active,
+              current_level,
+              user:users!agents_user_id_fkey(
+                id,
+                name,
+                email,
+                mobile_number
+              )
+            )
+          `
         )
         .eq("plan_id", planId);
+
+      console.log("📍 Positions:", { positions, positionsError });
+
       const safePositions = positions || [];
 
       if (safePositions.length === 0) {
+        console.warn("⚠️ No positions found");
         setPlanNetworkTrees((prev) => new Map(prev).set(planId, null));
         setLoading(false);
         return;
@@ -149,11 +164,15 @@ export default function AgentNetworkPage() {
       );
 
       if (!currentAgentPosition) {
+        console.warn("⚠️ Current agent has no position in this plan");
         setPlanNetworkTrees((prev) => new Map(prev).set(planId, null));
         setLoading(false);
         return;
       }
 
+      console.log("✅ Current agent position found:", currentAgentPosition);
+
+      // Fetch agent plans
       const agentIds = safePositions.map((p) => p.agent_id);
 
       const { data: agentPlansData } = await supabase
@@ -170,26 +189,43 @@ export default function AgentNetworkPage() {
         agentPlansMap.get(ap.agent_id)!.push(ap);
       });
 
+      // Fetch commissions for this plan - FIXED with proper foreign key
+      const { data: commissionsData, error: commissionsError } = await supabase
+        .from("commissions")
+        .select("from_agent_id, commission_amount, status")
+        .eq("agent_id", currentAgentId)
+        .eq("plan_id", planId)
+        .in("status", ["paid", "pending"]);
+
+      console.log("💰 Commissions:", { commissionsData, commissionsError });
+
+      const commMap = new Map<string, number>();
+      commissionsData?.forEach((c) => {
+        const current = commMap.get(c.from_agent_id) || 0;
+        commMap.set(c.from_agent_id, current + Number(c.commission_amount));
+      });
+      setAgentCommissions(commMap);
+
+      // Build tree
       function buildTree(
         agentId: string,
         currentLevel: number = 1
       ): AgentNode | null {
-        const settings = planSettings.get(planId);
         const pairingLimit = settings?.pairing_limit || 2;
         const maxDepth = settings?.max_depth || 50;
 
         if (currentLevel > maxDepth) {
           return null;
         }
-        const position = safePositions.find((p) => p.agent_id === agentId);
 
+        const position = safePositions.find((p) => p.agent_id === agentId);
         if (!position) return null;
 
         const children: AgentNode[] = [];
 
+        // Build children based on pairing limit
         for (let i = 1; i <= pairingLimit; i++) {
           const childField = `child_${i}_id`;
-
           if (position[childField]) {
             const child = buildTree(position[childField], currentLevel + 1);
             if (child) children.push(child);
@@ -208,20 +244,24 @@ export default function AgentNetworkPage() {
             ? {
                 referral_code: position.agent.referral_code,
                 is_active: position.agent.is_active,
+                current_level: position.agent.current_level || 1,
               }
             : undefined,
           plans: agentPlansMap.get(position.agent_id) || [],
           children,
         };
       }
+
       const tree = buildTree(currentAgentId, 1);
+      console.log("🌳 Tree built:", tree);
 
       setPlanNetworkTrees((prev) => new Map(prev).set(planId, tree));
 
       const stats = calculateNetworkStats(tree);
+      console.log("📊 Stats:", stats);
       setPlanStats((prev) => new Map(prev).set(planId, stats));
     } catch (error) {
-      console.error("Error fetching network:", error);
+      console.error("❌ Error fetching network:", error);
       setPlanNetworkTrees((prev) => new Map(prev).set(planId, null));
     }
 
@@ -394,11 +434,34 @@ export default function AgentNetworkPage() {
     <div className="min-h-screen bg-gray-100">
       <div className="max-w-6xl mx-auto px-4 py-6">
         {/* Header */}
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-800 mb-1">My Network</h1>
-          <p className="text-sm text-gray-600">
-            View and manage your team structure
-          </p>
+        <div className="mb-6 flex items-center gap-3">
+          <button
+            onClick={() => router.back()}
+            className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
+            aria-label="Go back"
+          >
+            <svg
+              className="w-6 h-6 text-gray-700"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-800 mb-1">
+              My Network
+            </h1>
+            <p className="text-sm text-gray-600">
+              View and manage your team structure
+            </p>
+          </div>
         </div>
 
         {/* Plan Tabs */}
@@ -485,6 +548,9 @@ export default function AgentNetworkPage() {
               <p className="text-gray-600">
                 No network data available for this plan yet
               </p>
+              <p className="text-sm text-gray-500 mt-2">
+                Share your referral code to start building your network
+              </p>
             </div>
           )}
         </div>
@@ -497,7 +563,7 @@ export default function AgentNetworkPage() {
           onClick={() => setSelectedAgent(null)}
         >
           <div
-            className="bg-white rounded-lg shadow-2xl max-w-md w-full p-6"
+            className="bg-white rounded-lg shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between mb-6">
@@ -576,7 +642,7 @@ export default function AgentNetworkPage() {
                   </p>
                 </div>
                 <div className="bg-green-50 p-3 rounded-lg">
-                  <p className="text-xs text-gray-600 mb-1">Level</p>
+                  <p className="text-xs text-gray-600 mb-1">Tree Level</p>
                   <p className="text-lg font-bold text-green-600">
                     {selectedAgent.level}
                   </p>
@@ -600,6 +666,33 @@ export default function AgentNetworkPage() {
                   </p>
                 </div>
               </div>
+
+              <div className="grid grid-cols-1 gap-3 pt-4 border-t border-gray-200">
+                <div className="bg-yellow-50 p-3 rounded-lg">
+                  <p className="text-xs text-gray-600 mb-1">Agent Level</p>
+                  <p className="text-lg font-bold text-yellow-600">
+                    Level {selectedAgent.agent?.current_level || 1}
+                  </p>
+                </div>
+              </div>
+
+              {agentCommissions.has(selectedAgent.agent_id) && (
+                <div className="pt-4 border-t border-gray-200">
+                  <p className="text-sm font-semibold text-gray-600 mb-2">
+                    Commission Generated for You:
+                  </p>
+                  <p className="text-3xl font-bold text-green-600">
+                    ₹
+                    {agentCommissions
+                      .get(selectedAgent.agent_id)
+                      ?.toLocaleString("en-IN")}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Total from this agent's purchases
+                  </p>
+                </div>
+              )}
+
               {selectedAgent.plans && selectedAgent.plans.length > 0 && (
                 <div className="pt-4 border-t border-gray-200">
                   <p className="text-sm font-semibold text-gray-600 mb-2">

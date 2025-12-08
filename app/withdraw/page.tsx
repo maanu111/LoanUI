@@ -37,17 +37,6 @@ export default function WithdrawPage() {
 
   // Form state
   const [amount, setAmount] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<
-    "bank_transfer" | "upi" | "paytm"
-  >("upi");
-  const [bankDetails, setBankDetails] = useState({
-    account_name: "",
-    account_number: "",
-    ifsc_code: "",
-    bank_name: "",
-  });
-  const [upiId, setUpiId] = useState("");
-  const [paytmNumber, setPaytmNumber] = useState("");
 
   const MIN_WITHDRAWAL = 500;
 
@@ -98,6 +87,15 @@ export default function WithdrawPage() {
         .select("commission_amount")
         .eq("agent_id", agentData.id)
         .eq("status", "paid");
+      const { data: cashbackRows } = await supabase
+        .from("agent_cashbacks")
+        .select("cashback_amount")
+        .eq("agent_id", agentData.id)
+        .eq("status", "credited");
+
+      const totalCashback =
+        cashbackRows?.reduce((sum, c) => sum + Number(c.cashback_amount), 0) ||
+        0;
 
       const totalPaid =
         paidCommissions?.reduce(
@@ -126,7 +124,10 @@ export default function WithdrawPage() {
       const totalPending =
         pendingReqs?.reduce((sum, w) => sum + Number(w.amount), 0) || 0;
 
-      setAvailableBalance(totalPaid - totalWithdrawn - totalPending);
+      setAvailableBalance(
+        totalPaid + totalCashback - totalWithdrawn - totalPending
+      );
+
       setPendingWithdrawals(totalPending);
 
       // Load withdrawal history
@@ -168,61 +169,19 @@ export default function WithdrawPage() {
       return;
     }
 
-    // Validate payment details
-    let paymentDetails: any = {};
-
-    if (paymentMethod === "bank_transfer") {
-      if (
-        !bankDetails.account_name ||
-        !bankDetails.account_number ||
-        !bankDetails.ifsc_code ||
-        !bankDetails.bank_name
-      ) {
-        alert("Please fill in all bank details");
-        return;
-      }
-      paymentDetails = bankDetails;
-    } else if (paymentMethod === "upi") {
-      if (!upiId) {
-        alert("Please enter UPI ID");
-        return;
-      }
-      paymentDetails = { upi_id: upiId };
-    } else if (paymentMethod === "paytm") {
-      if (!paytmNumber) {
-        alert("Please enter Paytm number");
-        return;
-      }
-      paymentDetails = { paytm_number: paytmNumber };
-    }
-
     try {
       setSubmitting(true);
 
       const { error } = await supabase.from("withdrawal_requests").insert({
         agent_id: agentId,
         amount: withdrawAmount,
-        payment_method: paymentMethod,
-        payment_details: paymentDetails,
         status: "pending",
       });
 
       if (error) throw error;
 
       alert("Withdrawal request submitted successfully!");
-
-      // Reset form
       setAmount("");
-      setBankDetails({
-        account_name: "",
-        account_number: "",
-        ifsc_code: "",
-        bank_name: "",
-      });
-      setUpiId("");
-      setPaytmNumber("");
-
-      // Reload data
       loadWithdrawalData();
     } catch (error) {
       console.error("Withdrawal request error:", error);
@@ -244,7 +203,7 @@ export default function WithdrawPage() {
     <div className="min-h-screen bg-gray-100">
       {/* Header */}
       <div className="bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 shadow-sm">
-        <div className="max-w-4xl mx-auto px-4 py-6">
+        <div className="max-w-5xl mx-auto px-4 py-6">
           <div className="flex items-center gap-4 mb-6">
             <button
               onClick={() => router.back()}
@@ -288,7 +247,7 @@ export default function WithdrawPage() {
         </div>
       </div>
 
-      <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+      <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
         {/* Important Notice */}
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex items-start gap-3">
@@ -313,167 +272,35 @@ export default function WithdrawPage() {
           </h2>
 
           <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Amount */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Withdrawal Amount
               </label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">
-                  ₹
-                </span>
-                <input
-                  type="number"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  placeholder="Enter amount"
-                  className="w-full pl-8 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  min={MIN_WITHDRAWAL}
-                  max={availableBalance}
-                  step="0.01"
-                />
-              </div>
-            </div>
-
-            {/* Payment Method */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">
-                Payment Method
-              </label>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="flex gap-3">
+                <div className="relative flex-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">
+                    ₹
+                  </span>
+                  <input
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Enter amount"
+                    className="w-full pl-8 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    min={MIN_WITHDRAWAL}
+                    max={availableBalance}
+                    step="0.01"
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => setPaymentMethod("upi")}
-                  className={`p-4 border-2 rounded-lg text-left transition-all ${
-                    paymentMethod === "upi"
-                      ? "border-blue-600 bg-blue-50"
-                      : "border-gray-200 hover:border-gray-300"
-                  }`}
+                  onClick={() => setAmount(availableBalance.toString())}
+                  className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium rounded-lg transition-colors whitespace-nowrap"
                 >
-                  <Smartphone className="w-6 h-6 text-blue-600 mb-2" />
-                  <p className="font-medium text-gray-900">UPI</p>
-                  <p className="text-xs text-gray-500">Google Pay, PhonePe</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod("bank_transfer")}
-                  className={`p-4 border-2 rounded-lg text-left transition-all ${
-                    paymentMethod === "bank_transfer"
-                      ? "border-blue-600 bg-blue-50"
-                      : "border-gray-200 hover:border-gray-300"
-                  }`}
-                >
-                  <Building className="w-6 h-6 text-blue-600 mb-2" />
-                  <p className="font-medium text-gray-900">Bank Transfer</p>
-                  <p className="text-xs text-gray-500">NEFT/IMPS/RTGS</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod("paytm")}
-                  className={`p-4 border-2 rounded-lg text-left transition-all ${
-                    paymentMethod === "paytm"
-                      ? "border-blue-600 bg-blue-50"
-                      : "border-gray-200 hover:border-gray-300"
-                  }`}
-                >
-                  <CreditCard className="w-6 h-6 text-blue-600 mb-2" />
-                  <p className="font-medium text-gray-900">Paytm</p>
-                  <p className="text-xs text-gray-500">Paytm Wallet</p>
+                  Withdraw All
                 </button>
               </div>
             </div>
-
-            {/* Payment Details */}
-            {paymentMethod === "bank_transfer" && (
-              <div className="space-y-4 bg-gray-50 p-4 rounded-lg">
-                <h3 className="font-medium text-gray-900">Bank Details</h3>
-                <input
-                  type="text"
-                  placeholder="Account Holder Name"
-                  value={bankDetails.account_name}
-                  onChange={(e) =>
-                    setBankDetails({
-                      ...bankDetails,
-                      account_name: e.target.value,
-                    })
-                  }
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Account Number"
-                  value={bankDetails.account_number}
-                  onChange={(e) =>
-                    setBankDetails({
-                      ...bankDetails,
-                      account_number: e.target.value,
-                    })
-                  }
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="IFSC Code"
-                  value={bankDetails.ifsc_code}
-                  onChange={(e) =>
-                    setBankDetails({
-                      ...bankDetails,
-                      ifsc_code: e.target.value.toUpperCase(),
-                    })
-                  }
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Bank Name"
-                  value={bankDetails.bank_name}
-                  onChange={(e) =>
-                    setBankDetails({
-                      ...bankDetails,
-                      bank_name: e.target.value,
-                    })
-                  }
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  required
-                />
-              </div>
-            )}
-
-            {paymentMethod === "upi" && (
-              <div className="bg-gray-50 p-4 rounded-lg">
-                <h3 className="font-medium text-gray-900 mb-3">UPI Details</h3>
-                <input
-                  type="text"
-                  placeholder="UPI ID (example@upi)"
-                  value={upiId}
-                  onChange={(e) => setUpiId(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  required
-                />
-              </div>
-            )}
-
-            {paymentMethod === "paytm" && (
-              <div className="bg-gray-50 p-4 rounded-lg">
-                <h3 className="font-medium text-gray-900 mb-3">
-                  Paytm Details
-                </h3>
-                <input
-                  type="tel"
-                  placeholder="Paytm Mobile Number"
-                  value={paytmNumber}
-                  onChange={(e) => setPaytmNumber(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  maxLength={10}
-                  required
-                />
-              </div>
-            )}
 
             {/* Submit Button */}
             <button
@@ -541,9 +368,7 @@ export default function WithdrawPage() {
                       })}
                     </p>
                   </div>
-                  <p className="text-sm text-gray-600">
-                    Via {req.payment_method.replace("_", " ").toUpperCase()}
-                  </p>
+
                   {req.rejection_reason && (
                     <p className="text-xs text-red-600 mt-2">
                       Reason: {req.rejection_reason}
