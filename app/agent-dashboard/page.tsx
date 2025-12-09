@@ -114,7 +114,15 @@ export default function AgentDashboard() {
   const [earningsByStatus, setEarningsByStatus] = useState<EarningsByStatus[]>(
     []
   );
+  const [planMap, setPlanMap] = useState<Record<string, string>>({});
+
+  const [lockedPlans, setLockedPlans] = useState<any[]>([]);
+
   const [earningsTimeline, setEarningsTimeline] = useState<any[]>([]);
+  const totalLockedAmount = lockedPlans.reduce(
+    (sum, p) => sum + Number(p.locked_amount),
+    0
+  );
 
   useEffect(() => {
     loadDashboardData();
@@ -172,6 +180,33 @@ export default function AgentDashboard() {
         .select("plan_id")
         .eq("agent_id", agentData.id)
         .eq("is_active", true);
+      //
+      const { data: plans } = await supabase
+        .from("plans")
+        .select("id, plan_name");
+
+      const map: Record<string, string> = {};
+      plans?.forEach((p) => {
+        map[p.id] = p.plan_name;
+      });
+
+      setPlanMap(map);
+
+      //
+      const { data: lockedRewards } = await supabase
+        .from("agent_plan_rewards")
+        .select(
+          `
+    locked_amount,
+    pairing_completed,
+    pairing_limit,
+    plan_id
+  `
+        )
+        .eq("agent_id", agentData.id)
+        .eq("is_released", false);
+
+      setLockedPlans(lockedRewards || []);
 
       // Fetch all commissions with related data - FIXED foreign key constraint
       const { data: commissionsData } = await supabase
@@ -356,6 +391,7 @@ export default function AgentDashboard() {
       </div>
     );
   }
+  console.log("LOCKED PLANS =>", lockedPlans);
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -585,6 +621,37 @@ export default function AgentDashboard() {
         </div>
 
         {/* Earnings by Plan */}
+        {/* 🔒 Locked Plan Earnings */}
+        {lockedPlans.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">
+              Locked Plan Earnings
+            </h2>
+
+            <div className="space-y-3">
+              {lockedPlans.map((p, i) => (
+                <div
+                  key={i}
+                  className="border rounded-lg p-4 flex justify-between items-center"
+                >
+                  <div>
+                    <div className="font-medium text-gray-900">
+                      {planMap[p.plan_id] ?? "Unknown Plan"}
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <div className="text-lg font-bold text-orange-600">
+                      ₹{Number(p.locked_amount).toLocaleString("en-IN")}
+                    </div>
+                    <div className="text-xs text-gray-500">Locked</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="bg-white rounded-lg shadow-sm p-6">
           <div className="mb-4">
             <h2 className="text-lg font-semibold text-gray-900">

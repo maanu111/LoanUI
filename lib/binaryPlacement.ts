@@ -11,10 +11,6 @@ interface PlacementResult {
   error?: string;
 }
 
-/**
- * Find the next available position in a tree for a specific plan
- * Supports 1-5 pairing limits dynamically
- */
 export async function findNextAvailablePosition(
   sponsorId: string,
   planId: string
@@ -301,7 +297,54 @@ export async function placeAgentInBinaryTree(
       .eq("plan_id", planId);
 
     if (updateError) throw updateError;
+    //
+    // ✅ PAIRING TRACKING & AUTO-RELEASE (80%)
+    const { data: rewardRow } = await supabase
+      .from("agent_plan_rewards")
+      .select("*")
+      .eq("agent_id", parent_id)
+      .eq("plan_id", planId)
+      .eq("is_released", false)
+      .maybeSingle();
 
+    if (rewardRow) {
+      const { data: updatedReward } = await supabase
+        .from("agent_plan_rewards")
+        .update({
+          pairing_completed: rewardRow.pairing_completed + 1,
+        })
+        .eq("id", rewardRow.id)
+        .eq("is_released", false)
+        .select()
+        .single();
+
+      if (!updatedReward) {
+        return { success: true };
+      }
+
+      if (updatedReward.pairing_completed >= rewardRow.pairing_limit) {
+        await supabase.from("commissions").insert({
+          agent_id: rewardRow.agent_id,
+          from_agent_id: agentId,
+          plan_id: rewardRow.plan_id,
+          commission_amount: rewardRow.locked_amount,
+          original_amount: rewardRow.locked_amount,
+          level: 0,
+          status: "paid",
+          payment_id: null,
+        });
+
+        await supabase
+          .from("agent_plan_rewards")
+          .update({
+            is_released: true,
+            released_at: new Date().toISOString(),
+          })
+          .eq("id", rewardRow.id);
+      }
+    }
+
+    //
     return { success: true };
   } catch (error) {
     console.error("Error placing agent:", error);
